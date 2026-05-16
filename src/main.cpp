@@ -176,27 +176,174 @@ char UART_receiveChar() {
 }
 
 
+/*
+Partea de citire a senzorilor
+
+*/
+void ADC_init() {
+    ADMUX = (1 << REFS0);
+    ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+}
+
+uint16_t ADC_read(uint8_t channel) {
+    ADMUX = (1 << REFS0) | (channel & 0x0F);
+    ADCSRA |= (1 << ADSC);
+    while (ADCSRA & (1 << ADSC));
+    return ADC;
+}
+
+uint8_t DHT11_read(uint8_t *temp) {
+    uint8_t data[5] = {0};
+    DHT_DDR |= (1 << DHT_PIN);
+    DHT_PORT &= ~(1 << DHT_PIN);
+    _delay_ms(20);
+    DHT_PORT |= (1 << DHT_PIN);
+    _delay_us(40);
+    DHT_DDR &= ~(1 << DHT_PIN);
+
+    uint16_t timeout = 0;
+    while (DHT_PINREG & (1 << DHT_PIN)) {
+        if (++timeout > 100) {
+            return 0;
+        } else {
+            _delay_us(1);
+        }
+    }
+    timeout = 0;
+    while (!(DHT_PINREG & (1 << DHT_PIN))) {
+        if (++timeout > 100) {
+            return 0;
+        } else {
+            _delay_us(1);
+        }
+    }
+    timeout = 0;
+    while (DHT_PINREG & (1 << DHT_PIN)) {
+        if (++timeout > 100) {
+            return 0;
+        } else {
+            _delay_us(1);
+        }
+    }
+
+    for (uint8_t i = 0; i < 40; i++) {
+        while (!(DHT_PINREG & (1 << DHT_PIN)));
+        _delay_us(35);
+        if (DHT_PINREG & (1 << DHT_PIN)) {
+            data[i / 8] |= (1 << (7 - (i % 8)));
+        }
+        while (DHT_PINREG & (1 << DHT_PIN));
+    }
+
+    uint8_t checksum = data[0] + data[1] + data[2] + data[3];
+    if (checksum != data[4]) return 0;
+    *temp = data[2];
+    return 1;
+}
+
+/* outputs si functii helper.*/
+void buzzer_beep(uint8_t times) {
+    for (uint8_t i = 0; i < times; i++) {
+        BUZZER_PORT |= (1 << BUZZER_PIN);
+        _delay_ms(120);
+        BUZZER_PORT &= ~(1 << BUZZER_PIN);
+        _delay_ms(120);
+    }
+}
+
+void pump_on() {
+    PUMP_PORT |= (1 << PUMP_PIN);
+    YELLOW_PORT |= (1 << YELLOW_PIN);
+    pump_active = 1;
+    pump_start_time = uptime_ms();
+    BT_log_event("PUMP", "ON");
+}
+
+void pump_off() {
+    PUMP_PORT &= ~(1 << PUMP_PIN);
+    YELLOW_PORT &= ~(1 << YELLOW_PIN);
+    pump_active = 0;
+    last_pump_time = uptime_ms();
+    BT_log_event("PUMP", "OFF");
+}
+
+void fan_on() {
+    FAN_PORT |= (1 << FAN_PIN);
+    RED_PORT |= (1 << RED_PIN);
+    fan_active = 1;
+    BT_log_event("FAN", "ON");
+}
+
+void fan_off() {
+    FAN_PORT &= ~(1 << FAN_PIN);
+    RED_PORT &= ~(1 << RED_PIN);
+    fan_active = 0;
+    BT_log_event("FAN", "OFF");
+}
+
+uint8_t water_available() {
+    return (WATER_PINREG & (1 << WATER_PIN));
+}
+
+uint8_t moisture_to_percent(uint16_t raw) {
+    if (raw >= MOISTURE_DRY_RAW) {
+        return 0;
+    }
+    if (raw <= MOISTURE_WET_RAW) {
+        return 100;
+    }
+    return (MOISTURE_DRY_RAW - raw) * 100UL / (MOISTURE_DRY_RAW - MOISTURE_WET_RAW);
+}
+
 
 int main() {
-    // 1. Inițializez modulele pe care le am gata
     TIMER0_init();
-    UART_init(103); // 103 corespunde unui baud rate de 9600 la 16MHz
+    UART_init(103); 
+    ADC_init();
     
-    // Activez intreruperile globale (esential pentru ca Timer0 sa functioneze)
-    sei(); 
+    // Setez pinii de iesire ca OUTPUT
+    FAN_DDR |= (1 << FAN_PIN);
+    PUMP_DDR |= (1 << PUMP_PIN);
+    BUZZER_DDR |= (1 << BUZZER_PIN);
+    YELLOW_DDR |= (1 << YELLOW_PIN);
+    RED_DDR |= (1 << RED_PIN);
+    
+    // Water sensor ca INPUT cu pull-up
+    WATER_DDR &= ~(1 << WATER_PIN);
+    WATER_PORT |= (1 << WATER_PIN); 
 
-    // 2. Trimit un mesaj de test la pornire
-    UART_sendString("TEST SISTEM PORNIT\r\n");
+    sei(); // Activez intreruperile
+
+    UART_sendString("TEST SENZORI PORNIT\r\n");
+    buzzer_beep(1); // Testez buzzerul la pornire
 
     uint32_t ultimul_mesaj = 0;
 
     while(1) {
         uint32_t timp_curent = uptime_ms();
 
-        // 3. Trimit un mesaj de log la fiecare 1000 ms (1 secundă)
-        if (timp_curent - ultimul_mesaj >= 1000) {
+        // citesc si afisez la fiecare 2 secunde,
+        // pentru a nu aglomera Bluetooth-ul cu prea multe mesaje, dar totusi sa avem o idee despre ce se intampla in sistem.
+        if (timp_curent - ultimul_mesaj >= 2000) {
             ultimul_mesaj = timp_curent;
-            BT_log_event("STATUS", "Timer si UART functioneaza corect");
+            
+            // Citire senzori
+            uint16_t moist_raw = ADC_read(MOISTURE_CHANNEL);
+            uint8_t procent_apa = moisture_to_percent(moist_raw);
+            uint8_t temp_val = 0;
+            DHT11_read(&temp_val);
+
+            // Trimit pe Serial
+            char buf[60];
+            sprintf(buf, "Umiditate: %d%% (%d raw) | Temp: %dC\r\n", procent_apa, moist_raw, temp_val);
+            UART_sendString(buf);
+            
+            // Un mic test pentru pompa: daca pamantul e complet uscat (sau senzorul scos), aprind LED-ul si pompa scurt
+            if (procent_apa < 10) {
+                pump_on();
+                _delay_ms(500); // doar pentru test si mergeee
+                pump_off();
+            }
         }
     }
 }
