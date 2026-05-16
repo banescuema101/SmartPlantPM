@@ -296,54 +296,348 @@ uint8_t moisture_to_percent(uint16_t raw) {
 }
 
 
-int main() {
-    TIMER0_init();
-    UART_init(103); 
-    ADC_init();
-    
-    // Setez pinii de iesire ca OUTPUT
-    FAN_DDR |= (1 << FAN_PIN);
-    PUMP_DDR |= (1 << PUMP_PIN);
-    BUZZER_DDR |= (1 << BUZZER_PIN);
-    YELLOW_DDR |= (1 << YELLOW_PIN);
-    RED_DDR |= (1 << RED_PIN);
-    
-    // Water sensor ca INPUT cu pull-up
-    WATER_DDR &= ~(1 << WATER_PIN);
-    WATER_PORT |= (1 << WATER_PIN); 
+/*
+PARTEA DE LCD I2C
 
-    sei(); // Activez intreruperile
+*/
 
-    UART_sendString("TEST SENZORI PORNIT\r\n");
-    buzzer_beep(1); // Testez buzzerul la pornire
+#define LCD_ADDR 0x27 // Adresa standard I2C LCD
 
-    uint32_t ultimul_mesaj = 0;
+void I2C_init() {
+    TWSR = 0x00;
+    TWBR = 72; // SCL = 100kHz la F_CPU=16MHz
+    TWCR = (1 << TWEN);
+}
 
-    while(1) {
-        uint32_t timp_curent = uptime_ms();
+void I2C_start() {
+    TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
 
-        // citesc si afisez la fiecare 2 secunde,
-        // pentru a nu aglomera Bluetooth-ul cu prea multe mesaje, dar totusi sa avem o idee despre ce se intampla in sistem.
-        if (timp_curent - ultimul_mesaj >= 2000) {
-            ultimul_mesaj = timp_curent;
-            
-            // Citire senzori
-            uint16_t moist_raw = ADC_read(MOISTURE_CHANNEL);
-            uint8_t procent_apa = moisture_to_percent(moist_raw);
-            uint8_t temp_val = 0;
-            DHT11_read(&temp_val);
+void I2C_stop() {
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN);
+}
 
-            // Trimit pe Serial
-            char buf[60];
-            sprintf(buf, "Umiditate: %d%% (%d raw) | Temp: %dC\r\n", procent_apa, moist_raw, temp_val);
-            UART_sendString(buf);
-            
-            // Un mic test pentru pompa: daca pamantul e complet uscat (sau senzorul scos), aprind LED-ul si pompa scurt
-            if (procent_apa < 10) {
+void I2C_write(uint8_t data) {
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+    while (!(TWCR & (1 << TWINT)));
+}
+
+void I2C_lcd_write(uint8_t data) {
+    I2C_start();
+    I2C_write(LCD_ADDR << 1);
+    I2C_write(data);
+    I2C_stop();
+}
+
+void LCD_command(uint8_t cmd) {
+    uint8_t data_u = (cmd & 0xF0);
+    uint8_t data_l = ((cmd << 4) & 0xF0);
+    I2C_lcd_write(data_u | 0x0C); // EN=1, RS=0, BL=1
+    I2C_lcd_write(data_u | 0x08); // EN=0, RS=0, BL=1
+    I2C_lcd_write(data_l | 0x0C);
+    I2C_lcd_write(data_l | 0x08);
+}
+
+void LCD_data(uint8_t data) {
+    uint8_t data_u = (data & 0xF0);
+    uint8_t data_l = ((data << 4) & 0xF0);
+    I2C_lcd_write(data_u | 0x0D); // EN=1, RS=1, BL=1
+    I2C_lcd_write(data_u | 0x09); // EN=0, RS=1, BL=1
+    I2C_lcd_write(data_l | 0x0D);
+    I2C_lcd_write(data_l | 0x09);
+}
+
+void LCD_init() {
+    _delay_ms(50);
+    LCD_command(0x33);
+    LCD_command(0x32);
+    LCD_command(0x28); // 4-bit mode, 2 lines, 5x8 font
+    LCD_command(0x0C); // Display ON, Cursor OFF
+    LCD_command(0x01); // Clear display
+    _delay_ms(2);
+}
+
+void LCD_printLine(const char *msg) {
+    LCD_command(0x01); // Clear
+    _delay_ms(2);
+    while (*msg) {
+        LCD_data(*msg++);
+    }
+}
+
+
+// Partea principala, unde fac logica propriu zisa: 
+
+void BUTTON_interrupt_init() {
+    BUTTON_DDR &= ~(1 << BUTTON_PIN);
+    BUTTON_PORT |= (1 << BUTTON_PIN); // Pull-up intern
+    PCICR |= (1 << PCIE2);
+    PCMSK2 |= (1 << PCINT20);
+}
+
+void task_read_sensors() {
+    moisture_raw = ADC_read(MOISTURE_CHANNEL);
+    light_raw = ADC_read(LIGHT_CHANNEL);
+    moisture_percent = moisture_to_percent(moisture_raw);
+    DHT11_read(&temperature);
+}
+
+void task_control() {
+    uint32_t now = uptime_ms();
+
+    // ---------- FAN-ul
+    if (currentMode != SYSTEM_OFF) {
+        if (!fan_active && temperature >= FAN_ON_TEMP) {
+            fan_on();
+        }
+        if (fan_active && temperature <= FAN_OFF_TEMP) {
+            fan_off();
+        }
+    } else {
+        if (fan_active) {
+            fan_off();
+        }
+    }
+
+    // ---------- PUMP TIMER
+    if (pump_active) {
+        uint32_t duration = (currentMode == MODE_ECO) ? PUMP_DURATION_ECO : PUMP_DURATION_CLASSIC;
+        if (now - pump_start_time >= duration) {
+            pump_off();
+        }
+    }
+
+    // ---------- PUMP CONDITIONS
+    if (!pump_active && currentMode != SYSTEM_OFF && (now - last_pump_time > PUMP_COOLDOWN)) {
+        uint8_t need_water = 0;
+
+        if (currentMode == MODE_CLASSIC && moisture_percent < CLASSIC_DRY_PERCENT) {
+            need_water = 1;
+        } else if (currentMode == MODE_ECO) {
+            if (moisture_percent < ECO_CRITICAL_PERCENT) {
+                need_water = 1;
+            } else if (moisture_percent < ECO_DRY_PERCENT && light_raw < LIGHT_EVENING_RAW) {
+                need_water = 1;
+            }
+        }
+
+        if (need_water) {
+            if (water_available()) {
                 pump_on();
-                _delay_ms(500); // doar pentru test si mergeee
-                pump_off();
+            } else {
+                LCD_printLine("LOW WATER");
+                BT_log_event("ERROR", "LOW_WATER");
+                buzzer_beep(2);
             }
         }
     }
 }
+
+void task_display() {
+    static uint8_t page = 0;
+    char buffer[17];
+
+    if (currentMode == SYSTEM_OFF) {
+        LCD_printLine("SYSTEM OFF");
+        return;
+    }
+
+    if (pump_active && fan_active) {
+        LCD_printLine("IRIGARE+VENT");
+        return;
+    }
+    if (pump_active) {
+        LCD_printLine("PLANTA SE UDA");
+        return;
+    }
+    if (fan_active) {
+        LCD_printLine("VENTILATIE");
+        return;
+    }
+
+    if (page == 0) {
+        sprintf(buffer, "Umiditate: %d%%", moisture_percent);
+    } else if (page == 1) {
+        sprintf(buffer, "Temp: %dC", temperature);
+    } else {
+        sprintf(buffer, "Lumina: %d", light_raw);
+    }
+
+    LCD_printLine(buffer);
+    page = (page >= 2) ? 0 : page + 1;
+}
+
+void handle_button() {
+    static uint8_t last_state = 1;
+    static uint32_t last_debounce = 0;
+    static uint32_t press_start = 0;
+    uint32_t now = uptime_ms();
+
+    if (!button_interrupt_flag) return;
+    button_interrupt_flag = 0;
+
+    if (now - last_debounce < DEBOUNCE_MS) {
+        return;
+    }
+    last_debounce = now;
+
+    uint8_t current_state = (BUTTON_PINREG & (1 << BUTTON_PIN)) ? 1 : 0;
+
+    if (last_state == 1 && current_state == 0) {
+        press_start = now; // Pressed
+    }
+
+    if (last_state == 0 && current_state == 1) { // Released
+        uint32_t duration = now - press_start;
+
+        if (duration >= LONG_PRESS_MS) {
+            currentMode = MODE_ECO;
+            GREEN_PORT |= (1 << GREEN_PIN); // LED Verde ON
+            LCD_printLine("MODE ECO");
+            BT_log_event("MODE", "ECO");
+            buzzer_beep(1);
+        } else {
+            if (currentMode == SYSTEM_OFF) {
+                currentMode = MODE_CLASSIC;
+                GREEN_PORT |= (1 << GREEN_PIN); // LED Verde ON
+                LCD_printLine("MODE CLASSIC");
+                BT_log_event("MODE", "CLASSIC");
+                buzzer_beep(1);
+            } else {
+                currentMode = SYSTEM_OFF;
+                GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde OFF
+                pump_off();
+                fan_off();
+                LCD_printLine("SYSTEM OFF");
+                BT_log_event("MODE", "OFF");
+                buzzer_beep(2);
+            }
+        }
+    }
+    last_state = current_state;
+}
+
+// pentru a nu aglomera Bluetooth-ul cu prea multe mesaje,
+// dar totusi sa avem o idee despre ce se intampla in sistem, am creat acest task care trimite periodic starea senzorilor si a sistemului.
+void task_logger() {
+    char buffer[60];
+    sprintf(buffer, "%d,%d,%d,%d,%d\r\n", 
+            moisture_percent, temperature, light_raw, pump_active, fan_active);
+    UART_sendString(buffer);
+}
+
+void task_bluetooth_commands() {
+    char cmd = UART_receiveChar();
+    
+    // Din aplicatia bluetooth (asta urmeaza sa fac in andorid
+    // studio -> kotlin)
+    // primesc comenzi pentru a schimba modul de functionare al sistemului.
+    // Comanda 'S' = toggle SYSTEM_OFF / MODE_CLASSIC
+    // Comanda 'E' = MODE_ECO
+    if (cmd != '\0') {
+        if (cmd == 'S') { 
+            if (currentMode == SYSTEM_OFF) {
+                currentMode = MODE_CLASSIC;
+                GREEN_PORT |= (1 << GREEN_PIN);
+                LCD_printLine("MODE CLASSIC");
+                buzzer_beep(1);
+            } else {
+                currentMode = SYSTEM_OFF;
+                GREEN_PORT &= ~(1 << GREEN_PIN);
+                pump_off();
+                fan_off();
+                LCD_printLine("SYSTEM OFF");
+                buzzer_beep(2);
+            }
+        } 
+        else if (cmd == 'E') { 
+            if (currentMode != SYSTEM_OFF) {
+                currentMode = MODE_ECO;
+                GREEN_PORT |= (1 << GREEN_PIN);
+                LCD_printLine("MODE ECO");
+                buzzer_beep(1);
+            }
+        }
+    }
+}
+
+
+
+
+// intializez porturile hardware, senzorii, led-urile, pompa, fanul
+// si intreruperile necesare pentru buton si timer.
+void hardware_init() {
+    ADC_init();
+    UART_init(103); // 9600 baud
+    I2C_init();
+    LCD_init();
+    TIMER0_init();
+    BUTTON_interrupt_init();
+
+    // Outputuri:
+    FAN_DDR |= (1 << FAN_PIN);
+    PUMP_DDR |= (1 << PUMP_PIN);
+    BUZZER_DDR |= (1 << BUZZER_PIN);
+    GREEN_DDR |= (1 << GREEN_PIN);
+    YELLOW_DDR |= (1 << YELLOW_PIN);
+    RED_DDR |= (1 << RED_PIN);
+
+    // Initializarea Starii (cu toate Oprite)
+    FAN_PORT &= ~(1 << FAN_PIN);
+    PUMP_PORT &= ~(1 << PUMP_PIN);
+    BUZZER_PORT &= ~(1 << BUZZER_PIN);
+    GREEN_PORT &= ~(1 << GREEN_PIN);
+    YELLOW_PORT &= ~(1 << YELLOW_PIN);
+    RED_PORT &= ~(1 << RED_PIN);
+
+    // Water sensor input cu pull-up.
+    WATER_DDR &= ~(1 << WATER_PIN);
+    WATER_PORT |= (1 << WATER_PIN); 
+
+    sei(); // Activarea pt intreruperi globale
+}
+
+int main() {
+    hardware_init();
+
+    LCD_printLine("SMART PLANT");
+    BT_log_event("SYSTEM", "BOOT");
+    buzzer_beep(2);
+
+    uint32_t last_sensor = 0;
+    uint32_t last_display = 0;
+    uint32_t last_control = 0;
+    uint32_t last_log = 0;
+
+    while (1) {
+        uint32_t now = uptime_ms();
+
+        handle_button();
+
+        /* LEGARE CU APLICATIA ANDROID*/
+        task_bluetooth_commands();
+
+        if (now - last_sensor >= SENSOR_PERIOD_MS) {
+            last_sensor = now;
+            task_read_sensors();
+        }
+
+        if (now - last_control >= CONTROL_PERIOD_MS) {
+            last_control = now;
+            task_control();
+        }
+
+        if (now - last_display >= DISPLAY_PERIOD_MS) {
+            last_display = now;
+            task_display();
+        }
+
+        if (now - last_log >= LOG_PERIOD_MS) {
+            last_log = now;
+            task_logger();
+        }
+    }
+}
+
