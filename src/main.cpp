@@ -115,7 +115,88 @@ uint16_t light_raw = 0;
 uint8_t moisture_percent = 0;
 uint8_t temperature = 0;
 
+/* ISR / TIME */
+// pentru a evita folosirea lui delay() care blocheaza tot sistemul,
+// folosesc un timer pentru a tine evidenta timpului si a genera intreruperi periodice.
+ISR(TIMER0_COMPA_vect) {
+    g_millis++;
+}
+
+ISR(PCINT2_vect) {
+    button_interrupt_flag = 1;
+}
+
+uint32_t uptime_ms() {
+    uint32_t value;
+    cli();
+    value = g_millis;
+    sei();
+    return value;
+}
+
+void TIMER0_init() {
+    TCCR0A |= (1 << WGM01);
+    OCR0A = 249;
+    TCCR0B |= (1 << CS01) | (1 << CS00);
+    TIMSK0 |= (1 << OCIE0A);
+}
+
+// Pentru a face somunicarea UART (Bluetooth) */
+void UART_init(unsigned int ubrr) {
+    UBRR0H = (unsigned char)(ubrr >> 8);
+    UBRR0L = (unsigned char)ubrr;
+    UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+    UCSR0C = (1 << UCSZ01) | (1 << UCSZ00);
+}
+
+void UART_sendChar(char c) {
+    while (!(UCSR0A & (1 << UDRE0)));
+    UDR0 = c;
+}
+
+void UART_sendString(const char *str) {
+    while (*str) UART_sendChar(*str++);
+}
+
+void BT_log_event(const char *event, const char *value) {
+    char buffer[100];
+    sprintf(buffer, "%lu,%s,%s\r\n", uptime_ms(), event, value);
+    UART_sendString(buffer);
+}
+
+uint8_t UART_available() {
+    return (UCSR0A & (1 << RXC0));
+}
+
+char UART_receiveChar() {
+    if (UART_available()) {
+        return UDR0;
+    }
+    return '\0';
+}
+
+
+
 int main() {
+    // 1. Inițializez modulele pe care le am gata
+    TIMER0_init();
+    UART_init(103); // 103 corespunde unui baud rate de 9600 la 16MHz
+    
+    // Activez intreruperile globale (esential pentru ca Timer0 sa functioneze)
+    sei(); 
+
+    // 2. Trimit un mesaj de test la pornire
+    UART_sendString("TEST SISTEM PORNIT\r\n");
+
+    uint32_t ultimul_mesaj = 0;
+
     while(1) {
+        uint32_t timp_curent = uptime_ms();
+
+        // 3. Trimit un mesaj de log la fiecare 1000 ms (1 secundă)
+        if (timp_curent - ultimul_mesaj >= 1000) {
+            ultimul_mesaj = timp_curent;
+            BT_log_event("STATUS", "Timer si UART functioneaza corect");
+        }
     }
 }
