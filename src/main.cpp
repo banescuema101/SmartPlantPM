@@ -77,8 +77,10 @@ Constantele
 #define CONTROL_PERIOD_MS      500
 #define LOG_PERIOD_MS          1000
 
+// Daca temp e mai mare ca FAN_ON_TEMP porneste ventilatorul, daca e mai mica ca FAN_OFF_TEMP opreste-l.
+// pentru test am asa:
 #define FAN_ON_TEMP            28
-#define FAN_OFF_TEMP           26
+#define FAN_OFF_TEMP           18
 
 #define CLASSIC_DRY_PERCENT    40
 #define ECO_DRY_PERCENT        35
@@ -159,9 +161,9 @@ void UART_sendString(const char *str) {
 }
 
 void BT_log_event(const char *event, const char *value) {
-    char buffer[100];
-    sprintf(buffer, "%lu,%s,%s\r\n", uptime_ms(), event, value);
-    UART_sendString(buffer);
+    // char buffer[100];
+    // sprintf(buffer, "%lu,%s,%s\r\n", uptime_ms(), event, value);
+    // UART_sendString(buffer);
 }
 
 uint8_t UART_available() {
@@ -253,7 +255,7 @@ void buzzer_beep(uint8_t times) {
 
 void pump_on() {
     PUMP_PORT |= (1 << PUMP_PIN);
-    YELLOW_PORT |= (1 << YELLOW_PIN);
+    YELLOW_PORT &= ~(1 << YELLOW_PIN);
     pump_active = 1;
     pump_start_time = uptime_ms();
     BT_log_event("PUMP", "ON");
@@ -261,7 +263,7 @@ void pump_on() {
 
 void pump_off() {
     PUMP_PORT &= ~(1 << PUMP_PIN);
-    YELLOW_PORT &= ~(1 << YELLOW_PIN);
+    YELLOW_PORT |= (1 << YELLOW_PIN);
     pump_active = 0;
     last_pump_time = uptime_ms();
     BT_log_event("PUMP", "OFF");
@@ -269,14 +271,14 @@ void pump_off() {
 
 void fan_on() {
     FAN_PORT |= (1 << FAN_PIN);
-    RED_PORT |= (1 << RED_PIN);
+    RED_PORT &= ~(1 << RED_PIN);
     fan_active = 1;
     BT_log_event("FAN", "ON");
 }
 
 void fan_off() {
     FAN_PORT &= ~(1 << FAN_PIN);
-    RED_PORT &= ~(1 << RED_PIN);
+    RED_PORT |= (1 << RED_PIN);
     fan_active = 0;
     BT_log_event("FAN", "OFF");
 }
@@ -494,20 +496,20 @@ void handle_button() {
 
         if (duration >= LONG_PRESS_MS) {
             currentMode = MODE_ECO;
-            GREEN_PORT |= (1 << GREEN_PIN); // LED Verde ON
+            GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde ON
             LCD_printLine("MODE ECO");
             BT_log_event("MODE", "ECO");
             buzzer_beep(1);
         } else {
             if (currentMode == SYSTEM_OFF) {
                 currentMode = MODE_CLASSIC;
-                GREEN_PORT |= (1 << GREEN_PIN); // LED Verde ON
+                GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde ON
                 LCD_printLine("MODE CLASSIC");
                 BT_log_event("MODE", "CLASSIC");
                 buzzer_beep(1);
             } else {
                 currentMode = SYSTEM_OFF;
-                GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde OFF
+                GREEN_PORT |= (1 << GREEN_PIN); // LED Verde OFF
                 pump_off();
                 fan_off();
                 LCD_printLine("SYSTEM OFF");
@@ -528,20 +530,23 @@ void task_logger() {
     UART_sendString(buffer);
 }
 
+
+
 void task_bluetooth_commands() {
-    char cmd = UART_receiveChar();
-    
-    // Din aplicatia bluetooth (asta urmeaza sa fac in andorid
-    // studio -> kotlin)
-    // primesc comenzi pentru a schimba modul de functionare al sistemului.
-    // Comanda 'S' = toggle SYSTEM_OFF / MODE_CLASSIC
-    // Comanda 'E' = MODE_ECO
-    if (cmd != '\0') {
-        if (cmd == 'S') { 
+
+    while (UART_available()) {
+
+        char cmd = UART_receiveChar();
+        // ignor ENTER / newline
+        if (cmd == '\n' || cmd == '\r') {
+            continue;
+        }
+        if (cmd == 'S') {
             if (currentMode == SYSTEM_OFF) {
                 currentMode = MODE_CLASSIC;
                 GREEN_PORT |= (1 << GREEN_PIN);
                 LCD_printLine("MODE CLASSIC");
+                // BT_log_event("MODE", "CLASSIC");
                 buzzer_beep(1);
             } else {
                 currentMode = SYSTEM_OFF;
@@ -549,19 +554,53 @@ void task_bluetooth_commands() {
                 pump_off();
                 fan_off();
                 LCD_printLine("SYSTEM OFF");
+                // BT_log_event("MODE", "OFF");
                 buzzer_beep(2);
             }
-        } 
-        else if (cmd == 'E') { 
-            if (currentMode != SYSTEM_OFF) {
-                currentMode = MODE_ECO;
-                GREEN_PORT |= (1 << GREEN_PIN);
-                LCD_printLine("MODE ECO");
-                buzzer_beep(1);
-            }
+        }
+
+        else if (cmd == 'E') {
+            currentMode = MODE_ECO;
+            GREEN_PORT |= (1 << GREEN_PIN);
+            LCD_printLine("MODE ECO");
+            BT_log_event("MODE", "ECO");
+            buzzer_beep(1);
         }
     }
 }
+
+
+
+// void task_bluetooth_commands() {
+//     char cmd = UART_receiveChar();
+    
+
+//     if (cmd != '\0') {
+//         if (cmd == 'S') { 
+//             if (currentMode == SYSTEM_OFF) {
+//                 currentMode = MODE_CLASSIC;
+//                 GREEN_PORT |= (1 << GREEN_PIN);
+//                 LCD_printLine("MODE CLASSIC");
+//                 buzzer_beep(1);
+//             } else {
+//                 currentMode = SYSTEM_OFF;
+//                 GREEN_PORT &= ~(1 << GREEN_PIN);
+//                 pump_off();
+//                 fan_off();
+//                 LCD_printLine("SYSTEM OFF");
+//                 buzzer_beep(2);
+//             }
+//         } 
+//         else if (cmd == 'E') { 
+//             if (currentMode != SYSTEM_OFF) {
+//                 currentMode = MODE_ECO;
+//                 GREEN_PORT |= (1 << GREEN_PIN);
+//                 LCD_printLine("MODE ECO");
+//                 buzzer_beep(1);
+//             }
+//         }
+//     }
+// }
 
 
 
@@ -588,9 +627,9 @@ void hardware_init() {
     FAN_PORT &= ~(1 << FAN_PIN);
     PUMP_PORT &= ~(1 << PUMP_PIN);
     BUZZER_PORT &= ~(1 << BUZZER_PIN);
-    GREEN_PORT &= ~(1 << GREEN_PIN);
-    YELLOW_PORT &= ~(1 << YELLOW_PIN);
-    RED_PORT &= ~(1 << RED_PIN);
+    GREEN_PORT |= (1 << GREEN_PIN);
+    YELLOW_PORT |= (1 << YELLOW_PIN);
+    RED_PORT |= (1 << RED_PIN);
 
     // Water sensor input cu pull-up.
     WATER_DDR &= ~(1 << WATER_PIN);
