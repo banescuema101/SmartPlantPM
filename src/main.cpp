@@ -1,6 +1,6 @@
 /*
- * SMART PLANT IRRIGATION SYSTEM
- * ATmega328P / Arduino UNO R3
+ * Smart Plant Irrigation System
+ * Arduino UNO R3 (ATmega328P)
  */
 
 #define F_CPU 16000000UL
@@ -15,6 +15,7 @@
 /* 
 Definitiile pinurilor:
 */
+
 // pentru ADC:
 #define MOISTURE_CHANNEL 0 // A0
 #define LIGHT_CHANNEL    1 // A1
@@ -25,50 +26,50 @@ Definitiile pinurilor:
 #define DHT_PINREG PINC
 #define DHT_PIN    PC2  // A2
 
-// Pentru BUTON D4
+// Pentru buton D4
 #define BUTTON_DDR      DDRD
 #define BUTTON_PORT     PORTD
 #define BUTTON_PINREG   PIND
 #define BUTTON_PIN      PD4
 
-// PENTRU FAN D5
-#define FAN_DDR    DDRD
-#define FAN_PORT   PORTD
-#define FAN_PIN    PD5
+// Pentru fan D5
+#define FAN_DDR    DDRB
+#define FAN_PORT   PORTB
+#define FAN_PIN    PB1 
 
-// Pentru PUMP D6
+// Pentru pump D6
 #define PUMP_DDR    DDRD
 #define PUMP_PORT   PORTD
 #define PUMP_PIN    PD6
 
-// Pentru BUZZER D8
+// Pentru buzzer D8
 #define BUZZER_DDR  DDRB
 #define BUZZER_PORT PORTB
 #define BUZZER_PIN  PB0
 
-// WATER SENSOR D9
-#define WATER_DDR      DDRB
-#define WATER_PORT     PORTB
-#define WATER_PINREG   PINB
-#define WATER_PIN      PB1
+// Pentru water sensor D9
+#define WATER_DDR      DDRD
+#define WATER_PORT     PORTD
+#define WATER_PINREG   PIND
+#define WATER_PIN      PD5
 
-// GREEN LED D10 (System State)
+// Pentru GREEN LED D10 (care are rolul de a indica daca sistemul este pornit sau oprit)
 #define GREEN_DDR  DDRB
 #define GREEN_PORT PORTB
 #define GREEN_PIN  PB2
 
-// YELLOW LED D11 (Pump Indicator)
+// Pentru YELLOW LED D11 (Pump Indicator)
 #define YELLOW_DDR  DDRB
 #define YELLOW_PORT PORTB
 #define YELLOW_PIN  PB3
 
-// RED LED D12 (Fan Indicator)
+// Pentru RED LED D12 (Fan Indicator)
 #define RED_DDR  DDRB
 #define RED_PORT PORTB
 #define RED_PIN  PB4
 
 /*
-Constantele
+Constantele din program:
 */
 #define DEBOUNCE_MS            50
 #define LONG_PRESS_MS          3000
@@ -77,17 +78,29 @@ Constantele
 #define CONTROL_PERIOD_MS      500
 #define LOG_PERIOD_MS          1000
 
-// Daca temp e mai mare ca FAN_ON_TEMP porneste ventilatorul, daca e mai mica ca FAN_OFF_TEMP opreste-l.
-// pentru test am asa:
-#define FAN_ON_TEMP            28
-#define FAN_OFF_TEMP           18
+// am decomentat, pentru ca acum am adaugat partera de PWM.
 
-#define CLASSIC_DRY_PERCENT    40
-#define ECO_DRY_PERCENT        35
-#define ECO_CRITICAL_PERCENT   20
+
+// Daca temp e mai mare ca FAN_ON_TEMP porneste ventilatorul, daca e mai mica ca FAN_OFF_TEMP opreste-l.
+// #define FAN_ON_TEMP            21
+// #define FAN_OFF_TEMP           18
+
+// Am comentat define-urile de mai jos,
+// intrucat initial nu introdusesem mai multe categorii de plante,
+// acum ca am 3 categorii: normale, cactus si tropicale, am mutat aceste valori
+// in variabile care se seteaza in functie de profilul plantei selectat.
+// si anume variabilele: plant_dry_percent si plant_pump_duration
+
+// Modul ECO reduce consumul de apa prin scaderea duratei de functionare
+// a pompei si prin utilizarea unor praguri mai conservative pentru udare.
+
+
+// #define CLASSIC_DRY_PERCENT    40
+// #define ECO_DRY_PERCENT        35
+// #define ECO_CRITICAL_PERCENT   20
 #define LIGHT_EVENING_RAW      450
-#define PUMP_DURATION_CLASSIC  3000
-#define PUMP_DURATION_ECO      1500
+// #define PUMP_DURATION_CLASSIC  3000
+// #define PUMP_DURATION_ECO      1500
 #define PUMP_COOLDOWN          10000
 
 #define MOISTURE_DRY_RAW       996
@@ -106,9 +119,27 @@ typedef enum {
 } SystemMode;
 
 SystemMode currentMode = SYSTEM_OFF;
+// pentru categoriile de plantute :)
+typedef enum {
+    PLANT_NORMAL,
+    PLANT_CACTUS,
+    PLANT_TROPICAL
+} PlantProfile;
+
+PlantProfile currentPlant = PLANT_NORMAL;
+
+uint8_t plant_dry_percent = 40;
+uint16_t plant_pump_duration = 3000;
+
 
 uint8_t pump_active = 0;
 uint8_t fan_active = 0;
+
+// adaug si cele 2 variabile pentru PWM:
+uint8_t fan_target_speed = 0;
+uint8_t fan_current_speed = 0;
+
+
 uint32_t pump_start_time = 0;
 uint32_t last_pump_time = 0;
 
@@ -117,17 +148,19 @@ uint16_t light_raw = 0;
 uint8_t moisture_percent = 0;
 uint8_t temperature = 0;
 
-/* ISR / TIME */
+// ISR pe Timer0, care se declanseaza la fiecare 1ms (configurat in TIMER0_init).
 // pentru a evita folosirea lui delay() care blocheaza tot sistemul,
 // folosesc un timer pentru a tine evidenta timpului si a genera intreruperi periodice.
 ISR(TIMER0_COMPA_vect) {
     g_millis++;
 }
 
+// ISR pentru buton, care seteaza un flag atunci cand butonul este apasat sau eliberat.
 ISR(PCINT2_vect) {
     button_interrupt_flag = 1;
 }
 
+// Functia helper ca sa obtin timpul de uptime in milisecunde, folosind variabila incrementata de ISR-ul Timer0.
 uint32_t uptime_ms() {
     uint32_t value;
     cli();
@@ -137,13 +170,64 @@ uint32_t uptime_ms() {
 }
 
 void TIMER0_init() {
+    // aici configurez Timer0 pentru a genera o intrerupere la fiecare 1ms, folosind CTC mode si un prescaler de 64.
     TCCR0A |= (1 << WGM01);
     OCR0A = 249;
     TCCR0B |= (1 << CS01) | (1 << CS00);
     TIMSK0 |= (1 << OCIE0A);
 }
 
-// Pentru a face somunicarea UART (Bluetooth) */
+
+// Functiile pentru pwm, pentru ca la ventilator, eu nu imi doresc
+// doar ON/OFF, ci sa pot regla viteza in functie de temperatura,
+// astfel incat daca e putin peste pragul de pornire, sa mearga
+// mai incet.
+
+void pwm_init(void)
+{
+    // D9 = PB1 = OC1A pe Arduino UNO
+    // acesta este pinul controlat de Timer1 prin OCR1A
+    FAN_DDR |= (1 << FAN_PIN);
+
+    // resetez registrele Timer1 inainte de configurare
+    TCCR1A = 0;
+    TCCR1B = 0;
+
+    // Fast PWM 8-bit
+    TCCR1A |= (1 << WGM10);
+    TCCR1B |= (1 << WGM12);
+
+    // PWM non-inverting pe OC1A
+    TCCR1A |= (1 << COM1A1);
+
+    // prescaler 64
+    TCCR1B |= (1 << CS11) | (1 << CS10);
+
+    // duty cycle initial 0%
+    OCR1A = 0;
+}
+
+void fan_set_speed(uint8_t percent)
+{
+    if (percent > 100)
+        percent = 100;
+
+    // Convertesc procentul in valoare PWM (0-255)
+    OCR1A = (percent * 255UL) / 100;
+    fan_active = (percent > 0);
+
+    if (fan_active) {
+        RED_PORT &= ~(1 << RED_PIN);   // LED-ul rosu ON
+    } else {
+        RED_PORT |= (1 << RED_PIN);    // LED-ul rosu OFF
+    }
+}
+
+
+
+
+
+// Pentru a face comunicarea UART (Bluetooth) */
 void UART_init(unsigned int ubrr) {
     UBRR0H = (unsigned char)(ubrr >> 8);
     UBRR0L = (unsigned char)ubrr;
@@ -180,8 +264,8 @@ char UART_receiveChar() {
 
 /*
 Partea de citire a senzorilor
-
 */
+
 void ADC_init() {
     ADMUX = (1 << REFS0);
     ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
@@ -194,16 +278,34 @@ uint16_t ADC_read(uint8_t channel) {
     return ADC;
 }
 
+// Functia DHT11_read citeste temperatura de la senzorul DHT11,
+// si salveaza in variabila temp: 1 daca citirea a fost reusita,
+// sau 0 in caz de eroare sau timeout.
 uint8_t DHT11_read(uint8_t *temp) {
+
+    // DHT11 trimite 40 de biti: 8 pentru umiditate intreaga,
+    // 8 pentru umiditate zecimala, 8 pentru temperatura intreaga,
+    // 8 pentru temperatura zecimala si 8 pentru checksum.
+    // si de aceea am initializat un array de 5 bytes pentru
+    // a stoca datele primite.
     uint8_t data[5] = {0};
+    // setez pinul DHT ca output, ca sa trimit semnalul de start.
     DHT_DDR |= (1 << DHT_PIN);
+
+    // trag pinul pe LOW timp de 20ms pentru a semnala startul
+    // comunicatiei catre DHT11.
     DHT_PORT &= ~(1 << DHT_PIN);
     _delay_ms(20);
+    // acum il ridic pe high.
     DHT_PORT |= (1 << DHT_PIN);
+    // astept 40 microsecunde, conform protocolului DHT11
+    // inainte de a schimba pinul pe input pentru a citi raspunsul senzorului.
     _delay_us(40);
     DHT_DDR &= ~(1 << DHT_PIN);
 
     uint16_t timeout = 0;
+    // astept ca DHT11 sa raspunda cu un semnal LOW, apoi HIGH, apoi LOW din nou,
+    // fiecare cu un timeout pentru a evita blocarea in caz de eroare.
     while (DHT_PINREG & (1 << DHT_PIN)) {
         if (++timeout > 100) {
             return 0;
@@ -228,6 +330,7 @@ uint8_t DHT11_read(uint8_t *temp) {
         }
     }
 
+    // si aici efectiv incep sa citesc cei 40 de biti trimisi de DHT11.
     for (uint8_t i = 0; i < 40; i++) {
         while (!(DHT_PINREG & (1 << DHT_PIN)));
         _delay_us(35);
@@ -236,7 +339,7 @@ uint8_t DHT11_read(uint8_t *temp) {
         }
         while (DHT_PINREG & (1 << DHT_PIN));
     }
-
+    // DHT11 trimite checksum pentru verificarea integritatii datelor.
     uint8_t checksum = data[0] + data[1] + data[2] + data[3];
     if (checksum != data[4]) return 0;
     *temp = data[2];
@@ -253,6 +356,10 @@ void buzzer_beep(uint8_t times) {
     }
 }
 
+// functie pentru a porni pompa, care seteaza pinul pompei pe HIGH
+// ,aprinde led-ul galben, seteaza variabila pump_active, salveaza timpul de start 
+// pentru a putea opri pompa dupa durata setata,
+// si trimite un mesaj de log prin Bluetooth.
 void pump_on() {
     PUMP_PORT |= (1 << PUMP_PIN);
     YELLOW_PORT &= ~(1 << YELLOW_PIN);
@@ -269,19 +376,6 @@ void pump_off() {
     BT_log_event("PUMP", "OFF");
 }
 
-void fan_on() {
-    FAN_PORT |= (1 << FAN_PIN);
-    RED_PORT &= ~(1 << RED_PIN);
-    fan_active = 1;
-    BT_log_event("FAN", "ON");
-}
-
-void fan_off() {
-    FAN_PORT &= ~(1 << FAN_PIN);
-    RED_PORT |= (1 << RED_PIN);
-    fan_active = 0;
-    BT_log_event("FAN", "OFF");
-}
 
 uint8_t water_available() {
     return (WATER_PINREG & (1 << WATER_PIN));
@@ -297,13 +391,11 @@ uint8_t moisture_to_percent(uint16_t raw) {
     return (MOISTURE_DRY_RAW - raw) * 100UL / (MOISTURE_DRY_RAW - MOISTURE_WET_RAW);
 }
 
-
 /*
 PARTEA DE LCD I2C
-
 */
 
-#define LCD_ADDR 0x27 // Adresa standard I2C LCD
+#define LCD_ADDR 0x27 // Adresa I2C LCD
 
 void I2C_init() {
     TWSR = 0x00;
@@ -333,15 +425,25 @@ void I2C_lcd_write(uint8_t data) {
     I2C_stop();
 }
 
+// Am preluat secventele de functii de mai jos de pe urmatorul link de github:
+// https://github.com/eshansurendra/liquid_crystal_i2c_avr/blob/main/src/main.c
+
+// trimite o comanda catre LCD.
+// Comenzile controleaza LCD-ul.
+// clear, cursor, mod afisare etc.
 void LCD_command(uint8_t cmd) {
+    // impart octetul in 2 jumatati, pentru modul 4-bit al LCD-ului.
     uint8_t data_u = (cmd & 0xF0);
     uint8_t data_l = ((cmd << 4) & 0xF0);
+    // EN = 1 -> activare transfer
     I2C_lcd_write(data_u | 0x0C); // EN=1, RS=0, BL=1
+    // EN = 0 -> concfirmare transfer.
     I2C_lcd_write(data_u | 0x08); // EN=0, RS=0, BL=1
     I2C_lcd_write(data_l | 0x0C);
     I2C_lcd_write(data_l | 0x08);
 }
 
+// Trimit un caracter catre LCD pentru afisare.
 void LCD_data(uint8_t data) {
     uint8_t data_u = (data & 0xF0);
     uint8_t data_l = ((data << 4) & 0xF0);
@@ -352,6 +454,7 @@ void LCD_data(uint8_t data) {
 }
 
 void LCD_init() {
+    // astept ca display-ul sa porneasca.
     _delay_ms(50);
     LCD_command(0x33);
     LCD_command(0x32);
@@ -372,6 +475,10 @@ void LCD_printLine(const char *msg) {
 
 // Partea principala, unde fac logica propriu zisa: 
 
+
+// initializez intreruperea pentru buton, setand pinul
+// ca input cu pull-up, si configurand intreruperea pe schimbare 
+// de stare (PCINT20 pentru PD4).
 void BUTTON_interrupt_init() {
     BUTTON_DDR &= ~(1 << BUTTON_PIN);
     BUTTON_PORT |= (1 << BUTTON_PIN); // Pull-up intern
@@ -379,6 +486,7 @@ void BUTTON_interrupt_init() {
     PCMSK2 |= (1 << PCINT20);
 }
 
+// functia care citeste senzorii de umiditate, lumina si temperatura.
 void task_read_sensors() {
     moisture_raw = ADC_read(MOISTURE_CHANNEL);
     light_raw = ADC_read(LIGHT_CHANNEL);
@@ -386,45 +494,119 @@ void task_read_sensors() {
     DHT11_read(&temperature);
 }
 
+// pentru a putea avea profile diferite, in functie de tipul plantei.
+// de exemplu pentru un cactus, pragul de "uscat" e de 20% umiditate, iar
+// pompa va porni doar 1 secunda atunci cand umiditatea scade sub 20%, in
+// timp ce pentru o planta tropicala, pragul de uscat e de 65%, iar
+// pompa porneste timp de 4 secunde, pentru a oferi mai multa apa.
+void set_plant_profile(char cmd) {
+    if (cmd == 'N') {
+        currentPlant = PLANT_NORMAL;
+        plant_dry_percent = 40;
+        plant_pump_duration = 3000;
+        LCD_printLine("PLANTA NORMALA");
+    } 
+    else if (cmd == 'C') {
+        currentPlant = PLANT_CACTUS;
+        plant_dry_percent = 20;
+        plant_pump_duration = 1000;
+        LCD_printLine("CACTUS");
+    } 
+    else if (cmd == 'F') {
+        currentPlant = PLANT_TROPICAL;
+        plant_dry_percent = 65;
+        plant_pump_duration = 4000;
+        LCD_printLine("TROPICALA");
+    }
+
+    buzzer_beep(1);
+}
+
+
 void task_control() {
     uint32_t now = uptime_ms();
 
-    // ---------- FAN-ul
+    // FAN-ul
+    // initial am avut doar ON/OFF pentru ventilator, dar acum ca am adaugat si variabila pentru viteza,
+    // am modificat logica astfel incat sa regleze viteza 
+    // in functie de temperatura, nu doar sa porneasca sau sa opreasca.
+    // if (currentMode != SYSTEM_OFF) {
+    //     if (!fan_active && temperature >= FAN_ON_TEMP) {
+    //         fan_on();
+    //     }
+    //     if (fan_active && temperature <= FAN_OFF_TEMP) {
+    //         fan_off();
+    //     }
+    // } else {
+    //     if (fan_active) {
+    //         fan_off();
+    //     }
+    // }
+
+    // // FAN ajutandu ma de PWM
+    // if (currentMode == SYSTEM_OFF) {
+    //     fan_target_speed = 0;
+    // } else {
+    //     if (temperature < 25) {
+    //         fan_target_speed = 0;
+    //     } else if (temperature < 30) {
+    //         fan_target_speed = 30;
+    //     } else if (temperature < 35) {
+    //         fan_target_speed = 60;
+    //     } else {
+    //         fan_target_speed = 100;
+    //     }
+    // }
+
+    // AM COMENTAT partrea de sus DOAR pentru test:
+    // pentru test las cele 5 linii de jos, si comentezi partea de deasupra.
     if (currentMode != SYSTEM_OFF) {
-        if (!fan_active && temperature >= FAN_ON_TEMP) {
-            fan_on();
-        }
-        if (fan_active && temperature <= FAN_OFF_TEMP) {
-            fan_off();
-        }
-    } else {
-        if (fan_active) {
-            fan_off();
-        }
+        fan_target_speed = 70;
+    }
+    else {
+        fan_target_speed = 0;
     }
 
-    // ---------- PUMP TIMER
+
+
+
+
+
+
+    // Pump Timer
     if (pump_active) {
-        uint32_t duration = (currentMode == MODE_ECO) ? PUMP_DURATION_ECO : PUMP_DURATION_CLASSIC;
+        uint32_t duration = plant_pump_duration;
+
+        if (currentMode == MODE_ECO) {
+            duration = plant_pump_duration / 2;
+        }
         if (now - pump_start_time >= duration) {
             pump_off();
         }
     }
 
-    // ---------- PUMP CONDITIONS
+    // Pump conditions:
     if (!pump_active && currentMode != SYSTEM_OFF && (now - last_pump_time > PUMP_COOLDOWN)) {
         uint8_t need_water = 0;
 
-        if (currentMode == MODE_CLASSIC && moisture_percent < CLASSIC_DRY_PERCENT) {
+        if (currentMode == MODE_CLASSIC && moisture_percent < plant_dry_percent) {
             need_water = 1;
+            // in modul eco, sunt mai conservativ cu udarea, 
+            // pentru a economisi apa, astfel incat
+            // pompa porneste doar daca umditatea scade sub pragul de uscat minus 10%, 
+            // sau daca e seara (lumina scade sub un prag) si umiditatea e sub pragul de uscat.
         } else if (currentMode == MODE_ECO) {
-            if (moisture_percent < ECO_CRITICAL_PERCENT) {
+            if (moisture_percent < plant_dry_percent - 10) {
                 need_water = 1;
-            } else if (moisture_percent < ECO_DRY_PERCENT && light_raw < LIGHT_EVENING_RAW) {
+            } else if (moisture_percent < plant_dry_percent && light_raw < LIGHT_EVENING_RAW) {
                 need_water = 1;
             }
         }
-
+        // in caz in care teoretic, conform conditiilor, ar trebui
+        // sa porneasca pompa, dar senzorul de apa
+        // indica ca nu mai este apa disponibila, atunci afisez
+        // un mesaj de eroare pe LCD, trimit un log prin Bluetooth si emit
+        // si un semnal sonor cu buzzer-ul pentru a atrage atentia userului.
         if (need_water) {
             if (water_available()) {
                 pump_on();
@@ -437,7 +619,43 @@ void task_control() {
     }
 }
 
+// adaug un task separat pentru cresterea / scaderea treptata
+// a vitezei ventilatorului, astfel incat sa nu fie schimbari
+// bruste care ar putea fi deranjante pentru planta sau pentru
+// utilizator.
+void task_fan_pwm()
+{
+    static uint8_t startup_boost = 0;
+
+    // boost initial pentru pornirea ventilatorului
+    if (fan_current_speed == 0 && fan_target_speed > 0 && !startup_boost) {
+        fan_current_speed = 100;
+        startup_boost = 1;
+        fan_set_speed(fan_current_speed);
+        return;
+    }
+
+    // ajustare graduala spre viteza dorita
+    if (fan_current_speed < fan_target_speed) {
+        fan_current_speed++;
+    }
+    else if (fan_current_speed > fan_target_speed) {
+        fan_current_speed--;
+    }
+
+    // reset boost daca ventilatorul este complet oprit
+    if (fan_target_speed == 0 && fan_current_speed == 0) {
+        startup_boost = 0;
+    }
+
+    fan_set_speed(fan_current_speed);
+}
+
+
 void task_display() {
+    // page pentru a alterna intre afisarea umiditatii, temperaturii
+    // si luminii, a.i sa putem vedea toate informatiile relevante
+    // fara a aglomera ecranul cu prea multe date in acelasi timp.
     static uint8_t page = 0;
     char buffer[17];
 
@@ -471,29 +689,45 @@ void task_display() {
     page = (page >= 2) ? 0 : page + 1;
 }
 
+// aici folosesc debounde software, detectarea short pressului si
+// detectarea long press-ului pentru a schimba intre modurile
+// de functionare ale sistemului
 void handle_button() {
+    // ultima stare a butonului (1 = neapasat, 0 = apasat).
     static uint8_t last_state = 1;
+    // timpul ultimei intreruperi valide, pentru debounce.
     static uint32_t last_debounce = 0;
+    // momentul in care butonul a fost apasat.
     static uint32_t press_start = 0;
+
     uint32_t now = uptime_ms();
 
+    // daca nu exista vreun eveniment de intrerupere, ies din functie.
     if (!button_interrupt_flag) return;
+    
+    // resetez flag-ul de intrerupere
     button_interrupt_flag = 0;
 
+    // debounce software: ignor apasarile foarte apropiate.
     if (now - last_debounce < DEBOUNCE_MS) {
         return;
     }
     last_debounce = now;
 
+    // citesc starea actuala a butonului.
     uint8_t current_state = (BUTTON_PINREG & (1 << BUTTON_PIN)) ? 1 : 0;
 
+    // detectez in momentul apasarii: tranzitie HIGH -> LOW
     if (last_state == 1 && current_state == 0) {
+        // si salvez momentul inceperii apasarii:
         press_start = now; // Pressed
     }
 
-    if (last_state == 0 && current_state == 1) { // Released
+    // aici detectez eliberarea butonului, tranizita LOW -> HIGH.
+    if (last_state == 0 && current_state == 1) {
+        // calculez durata apasarii:
         uint32_t duration = now - press_start;
-
+        // daca e LONG PRESS -> activez modul ECO.
         if (duration >= LONG_PRESS_MS) {
             currentMode = MODE_ECO;
             GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde ON
@@ -501,6 +735,7 @@ void handle_button() {
             BT_log_event("MODE", "ECO");
             buzzer_beep(1);
         } else {
+            // SHORT PRESS:
             if (currentMode == SYSTEM_OFF) {
                 currentMode = MODE_CLASSIC;
                 GREEN_PORT &= ~(1 << GREEN_PIN); // LED Verde ON
@@ -508,10 +743,17 @@ void handle_button() {
                 BT_log_event("MODE", "CLASSIC");
                 buzzer_beep(1);
             } else {
+                // daca sistemul era deja pornit, un short
+                // pres va opri complet sistemul.
                 currentMode = SYSTEM_OFF;
                 GREEN_PORT |= (1 << GREEN_PIN); // LED Verde OFF
                 pump_off();
-                fan_off();
+                pump_off();
+
+                fan_target_speed = 0;
+                fan_current_speed = 0;
+                fan_set_speed(0);
+
                 LCD_printLine("SYSTEM OFF");
                 BT_log_event("MODE", "OFF");
                 buzzer_beep(2);
@@ -533,32 +775,45 @@ void task_logger() {
 
 
 void task_bluetooth_commands() {
-
+    // // verific daca exista date primite prin Bluetooth
     while (UART_available()) {
-
+        // citesc un caracter primit.
         char cmd = UART_receiveChar();
+
+        // trimit inapoi comanda pentru debugging:
+        UART_sendString("CMD:");
+        UART_sendChar(cmd);
+        UART_sendString("\r\n");
+
         // ignor ENTER / newline
         if (cmd == '\n' || cmd == '\r') {
             continue;
         }
+        // comanda S -> pornire / oprire sistem
         if (cmd == 'S') {
+            // daca sistemul este oprit, il pornesc in modul
+            // clasic.
             if (currentMode == SYSTEM_OFF) {
                 currentMode = MODE_CLASSIC;
                 GREEN_PORT |= (1 << GREEN_PIN);
+
                 LCD_printLine("MODE CLASSIC");
                 // BT_log_event("MODE", "CLASSIC");
                 buzzer_beep(1);
             } else {
                 currentMode = SYSTEM_OFF;
                 GREEN_PORT &= ~(1 << GREEN_PIN);
+
                 pump_off();
-                fan_off();
+                fan_target_speed = 0;
+                fan_current_speed = 0;
+                fan_set_speed(0);
+
                 LCD_printLine("SYSTEM OFF");
                 // BT_log_event("MODE", "OFF");
                 buzzer_beep(2);
             }
         }
-
         else if (cmd == 'E') {
             currentMode = MODE_ECO;
             GREEN_PORT |= (1 << GREEN_PIN);
@@ -566,47 +821,18 @@ void task_bluetooth_commands() {
             BT_log_event("MODE", "ECO");
             buzzer_beep(1);
         }
+        // setarea profilului plantei
+        else if (cmd == 'N' || cmd == 'C' || cmd == 'F') {
+            set_plant_profile(cmd);
+        }
+
     }
 }
 
 
 
-// void task_bluetooth_commands() {
-//     char cmd = UART_receiveChar();
-    
-
-//     if (cmd != '\0') {
-//         if (cmd == 'S') { 
-//             if (currentMode == SYSTEM_OFF) {
-//                 currentMode = MODE_CLASSIC;
-//                 GREEN_PORT |= (1 << GREEN_PIN);
-//                 LCD_printLine("MODE CLASSIC");
-//                 buzzer_beep(1);
-//             } else {
-//                 currentMode = SYSTEM_OFF;
-//                 GREEN_PORT &= ~(1 << GREEN_PIN);
-//                 pump_off();
-//                 fan_off();
-//                 LCD_printLine("SYSTEM OFF");
-//                 buzzer_beep(2);
-//             }
-//         } 
-//         else if (cmd == 'E') { 
-//             if (currentMode != SYSTEM_OFF) {
-//                 currentMode = MODE_ECO;
-//                 GREEN_PORT |= (1 << GREEN_PIN);
-//                 LCD_printLine("MODE ECO");
-//                 buzzer_beep(1);
-//             }
-//         }
-//     }
-// }
-
-
-
-
 // intializez porturile hardware, senzorii, led-urile, pompa, fanul
-// si intreruperile necesare pentru buton si timer.
+// si intreruperile necesare pentru buton si timer
 void hardware_init() {
     ADC_init();
     UART_init(103); // 9600 baud
@@ -614,8 +840,10 @@ void hardware_init() {
     LCD_init();
     TIMER0_init();
     BUTTON_interrupt_init();
+    pwm_init();
 
-    // Outputuri:
+
+    // Outputurile
     FAN_DDR |= (1 << FAN_PIN);
     PUMP_DDR |= (1 << PUMP_PIN);
     BUZZER_DDR |= (1 << BUZZER_PIN);
@@ -623,7 +851,7 @@ void hardware_init() {
     YELLOW_DDR |= (1 << YELLOW_PIN);
     RED_DDR |= (1 << RED_PIN);
 
-    // Initializarea Starii (cu toate Oprite)
+    // initializarea starii (cu toate oprite)
     FAN_PORT &= ~(1 << FAN_PIN);
     PUMP_PORT &= ~(1 << PUMP_PIN);
     BUZZER_PORT &= ~(1 << BUZZER_PIN);
@@ -631,11 +859,11 @@ void hardware_init() {
     YELLOW_PORT |= (1 << YELLOW_PIN);
     RED_PORT |= (1 << RED_PIN);
 
-    // Water sensor input cu pull-up.
+    // Water sensor input cu pull-up
     WATER_DDR &= ~(1 << WATER_PIN);
     WATER_PORT |= (1 << WATER_PIN); 
 
-    sei(); // Activarea pt intreruperi globale
+    sei(); // activarea pt intreruperi globale
 }
 
 int main() {
@@ -650,12 +878,14 @@ int main() {
     uint32_t last_control = 0;
     uint32_t last_log = 0;
 
+    // pentru partea de pwm:
+    uint32_t last_fan_pwm = 0;
+
     while (1) {
         uint32_t now = uptime_ms();
-
         handle_button();
 
-        /* LEGARE CU APLICATIA ANDROID*/
+        /* Legarea cu aplicatia andorid*/
         task_bluetooth_commands();
 
         if (now - last_sensor >= SENSOR_PERIOD_MS) {
@@ -666,6 +896,12 @@ int main() {
         if (now - last_control >= CONTROL_PERIOD_MS) {
             last_control = now;
             task_control();
+        }
+
+        // task_fan_pwm:
+        if (now - last_fan_pwm >= 50) {
+            last_fan_pwm = now;
+            task_fan_pwm();
         }
 
         if (now - last_display >= DISPLAY_PERIOD_MS) {
