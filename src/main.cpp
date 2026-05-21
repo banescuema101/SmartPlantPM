@@ -32,7 +32,7 @@ Definitiile pinurilor:
 #define BUTTON_PINREG   PIND
 #define BUTTON_PIN      PD4
 
-// Pentru fan D5
+// Pentru fan D9
 #define FAN_DDR    DDRB
 #define FAN_PORT   PORTB
 #define FAN_PIN    PB1 
@@ -47,7 +47,7 @@ Definitiile pinurilor:
 #define BUZZER_PORT PORTB
 #define BUZZER_PIN  PB0
 
-// Pentru water sensor D9
+// Pentru water sensor D5
 #define WATER_DDR      DDRD
 #define WATER_PORT     PORTD
 #define WATER_PINREG   PIND
