@@ -12,6 +12,14 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define DEMO_MODE 1
+
+#if DEMO_MODE
+uint8_t demo_temperature = 24;
+#endif
+
+
+
 /* 
 Definitiile pinurilor:
 */
@@ -98,7 +106,7 @@ Constantele din program:
 // #define CLASSIC_DRY_PERCENT    40
 // #define ECO_DRY_PERCENT        35
 // #define ECO_CRITICAL_PERCENT   20
-#define LIGHT_EVENING_RAW      450
+#define LIGHT_EVENING_RAW      900
 // #define PUMP_DURATION_CLASSIC  3000
 // #define PUMP_DURATION_ECO      1500
 #define PUMP_COOLDOWN          10000
@@ -111,6 +119,9 @@ Variabile globale pentru stocarea starii sistemului, a senzorilor si a timpilor.
 */
 volatile uint32_t g_millis = 0;
 volatile uint8_t button_interrupt_flag = 0;
+
+
+uint16_t light_lux = 0;
 
 typedef enum {
     SYSTEM_OFF,
@@ -490,8 +501,14 @@ void BUTTON_interrupt_init() {
 void task_read_sensors() {
     moisture_raw = ADC_read(MOISTURE_CHANNEL);
     light_raw = ADC_read(LIGHT_CHANNEL);
+    light_lux = (1023 - light_raw) * 1000UL / 1023;
     moisture_percent = moisture_to_percent(moisture_raw);
+
+#if DEMO_MODE
+    temperature = demo_temperature;
+#else
     DHT11_read(&temperature);
+#endif
 }
 
 // pentru a putea avea profile diferite, in functie de tipul plantei.
@@ -504,18 +521,23 @@ void set_plant_profile(char cmd) {
         currentPlant = PLANT_NORMAL;
         plant_dry_percent = 40;
         plant_pump_duration = 3000;
+
+
+        demo_temperature = 24;
         LCD_printLine("PLANTA NORMALA");
     } 
     else if (cmd == 'C') {
         currentPlant = PLANT_CACTUS;
         plant_dry_percent = 20;
         plant_pump_duration = 1000;
+        demo_temperature = 30;
         LCD_printLine("CACTUS");
     } 
     else if (cmd == 'F') {
         currentPlant = PLANT_TROPICAL;
         plant_dry_percent = 65;
         plant_pump_duration = 4000;
+        demo_temperature = 36;
         LCD_printLine("TROPICALA");
     }
 
@@ -543,29 +565,29 @@ void task_control() {
     //     }
     // }
 
-    // // FAN ajutandu ma de PWM
-    // if (currentMode == SYSTEM_OFF) {
-    //     fan_target_speed = 0;
-    // } else {
-    //     if (temperature < 25) {
-    //         fan_target_speed = 0;
-    //     } else if (temperature < 30) {
-    //         fan_target_speed = 30;
-    //     } else if (temperature < 35) {
-    //         fan_target_speed = 60;
-    //     } else {
-    //         fan_target_speed = 100;
-    //     }
-    // }
+    // FAN ajutandu ma de PWM
+    if (currentMode == SYSTEM_OFF) {
+        fan_target_speed = 0;
+    } else {
+        if (temperature < 25) {
+            fan_target_speed = 0;
+        } else if (temperature < 30) {
+            fan_target_speed = 30;
+        } else if (temperature < 35) {
+            fan_target_speed = 60;
+        } else {
+            fan_target_speed = 100;
+        }
+    }
 
     // AM COMENTAT partrea de sus DOAR pentru test:
     // pentru test las cele 5 linii de jos, si comentezi partea de deasupra.
-    if (currentMode != SYSTEM_OFF) {
-        fan_target_speed = 70;
-    }
-    else {
-        fan_target_speed = 0;
-    }
+    // if (currentMode != SYSTEM_OFF) {
+    //     fan_target_speed = 70;
+    // }
+    // else {
+    //     fan_target_speed = 0;
+    // }
 
 
 
@@ -598,7 +620,7 @@ void task_control() {
         } else if (currentMode == MODE_ECO) {
             if (moisture_percent < plant_dry_percent - 10) {
                 need_water = 1;
-            } else if (moisture_percent < plant_dry_percent && light_raw < LIGHT_EVENING_RAW) {
+            } else if (moisture_percent < plant_dry_percent && light_lux < 1000 - LIGHT_EVENING_RAW) {
                 need_water = 1;
             }
         }
@@ -682,7 +704,7 @@ void task_display() {
     } else if (page == 1) {
         sprintf(buffer, "Temp: %dC", temperature);
     } else {
-        sprintf(buffer, "Lumina: %d", light_raw);
+        sprintf(buffer, "Lux: %d", light_lux);
     }
 
     LCD_printLine(buffer);
@@ -748,7 +770,6 @@ void handle_button() {
                 currentMode = SYSTEM_OFF;
                 GREEN_PORT |= (1 << GREEN_PIN); // LED Verde OFF
                 pump_off();
-                pump_off();
 
                 fan_target_speed = 0;
                 fan_current_speed = 0;
@@ -795,14 +816,14 @@ void task_bluetooth_commands() {
             // clasic.
             if (currentMode == SYSTEM_OFF) {
                 currentMode = MODE_CLASSIC;
-                GREEN_PORT |= (1 << GREEN_PIN);
+                GREEN_PORT &= ~(1 << GREEN_PIN); // ON
 
                 LCD_printLine("MODE CLASSIC");
                 // BT_log_event("MODE", "CLASSIC");
                 buzzer_beep(1);
             } else {
                 currentMode = SYSTEM_OFF;
-                GREEN_PORT &= ~(1 << GREEN_PIN);
+                GREEN_PORT |= (1 << GREEN_PIN); // OFF
 
                 pump_off();
                 fan_target_speed = 0;
@@ -816,7 +837,7 @@ void task_bluetooth_commands() {
         }
         else if (cmd == 'E') {
             currentMode = MODE_ECO;
-            GREEN_PORT |= (1 << GREEN_PIN);
+            GREEN_PORT &= ~(1 << GREEN_PIN); // ON
             LCD_printLine("MODE ECO");
             BT_log_event("MODE", "ECO");
             buzzer_beep(1);
