@@ -194,6 +194,9 @@ void TIMER0_init() {
 // astfel incat daca e putin peste pragul de pornire, sa mearga
 // mai incet.
 
+
+// In modul non-inverting, hardware-ul, la bottom (cand timerul ajunge la 0)
+// seteaza OC1A = HIGH, iar la top (cand timerul ajunge la valoarea din OCR1A) seteaza OC1A = LOW.
 void pwm_init(void)
 {
     // D9 = PB1 = OC1A pe Arduino UNO
@@ -217,13 +220,22 @@ void pwm_init(void)
     // duty cycle initial 0%
     OCR1A = 0;
 }
+// la un duty-cycle de 50 % de exemplu, ventilatorul va functiona la jumatate din viteza
+// intrucat pinul ar face: 5V - 0V - 5V - OV foarte rapid
+// la noi, de 976 ori pe secunda, iar motorul ventilatorului va vedea o energie medie de 50 %
+// si nu va mai avea turatii atat de rapide.
 
 void fan_set_speed(uint8_t percent)
 {
     if (percent > 100)
         percent = 100;
 
-    // Convertesc procentul in valoare PWM (0-255)
+
+    // am gandit viteza ventilatorului
+    // in 0% -----> 100%.
+    // si transform 0 - 100% in 0 - 255 pentru a seta valoarea
+    // in OCR1A, care controleaza duty-cycle-ul semnalului PWM.
+
     OCR1A = (percent * 255UL) / 100;
     fan_active = (percent > 0);
 
@@ -233,8 +245,6 @@ void fan_set_speed(uint8_t percent)
         RED_PORT |= (1 << RED_PIN);    // LED-ul rosu OFF
     }
 }
-
-
 
 
 
@@ -277,16 +287,28 @@ char UART_receiveChar() {
 Partea de citire a senzorilor
 */
 
+// functia ADC_init:
+// - seteaza referinta de tensiune pentru conversiile ADC la AVcc (5V),
+// - activeaza modul ADC si seteaaza prescaler-ul la 128.
 void ADC_init() {
     ADMUX = (1 << REFS0);
+    // 1 << ADEN -> ADC enable
+    // si registrele ADPS seteaza prescaler-ul la 128.
+    // imi trebuie mereu sa setez prescaler-ul
+    // pentru ca CPU-ul ruleaza la 16 MHz, iar ADC-ul nu poate fucntiona atat de rapid.
+    // => 125 KHz e ideal.
     ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 }
 
+// functia ADC_read primeste ca parametru numarul canalului (0-7) de pe care vreu sa citesc
 uint16_t ADC_read(uint8_t channel) {
     ADMUX = (1 << REFS0) | (channel & 0x0F);
     ADCSRA |= (1 << ADSC);
     while (ADCSRA & (1 << ADSC));
+
+    // cand conversia se termina, hardware-ul pune automat ADSC = 0.
     return ADC;
+    // si returnez valoarea intre 0 si 1023 ;
 }
 
 // Functia DHT11_read citeste temperatura de la senzorul DHT11,
@@ -317,6 +339,9 @@ uint8_t DHT11_read(uint8_t *temp) {
     uint16_t timeout = 0;
     // astept ca DHT11 sa raspunda cu un semnal LOW, apoi HIGH, apoi LOW din nou,
     // fiecare cu un timeout pentru a evita blocarea in caz de eroare.
+    // DHT_PINREG e definit ca PINC, adica registrul care citeste starea reala a pinilor de pe portul C.
+    
+    // astept pana cand devine LOW, pe 0.
     while (DHT_PINREG & (1 << DHT_PIN)) {
         if (++timeout > 100) {
             return 0;
@@ -324,6 +349,7 @@ uint8_t DHT11_read(uint8_t *temp) {
             _delay_us(1);
         }
     }
+    // astept pana cand devine HIGH, pe 1.
     timeout = 0;
     while (!(DHT_PINREG & (1 << DHT_PIN))) {
         if (++timeout > 100) {
@@ -392,6 +418,14 @@ uint8_t water_available() {
     return (WATER_PINREG & (1 << WATER_PIN));
 }
 
+// prin experimente, obtinusem ca valori brute
+// 385 pt sol complet umed, si 996 pentru sol complet uscat.
+
+// transform in 100% -----> 0 %.
+// 611 unitati ADC = 100%.
+// Daca senzorul citeste raw = 700
+// imi pun problema cat de departe este de uscat?
+// 996 - 700 = 296.  (din totalul de 611) adica (296 / 611) * 100 = aprox 48 %.
 uint8_t moisture_to_percent(uint16_t raw) {
     if (raw >= MOISTURE_DRY_RAW) {
         return 0;
